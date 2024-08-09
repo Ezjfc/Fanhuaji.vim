@@ -3,10 +3,10 @@
 " Version:    1.0
 "
 " Credits:
-" zhcovert.org              - 小斐
 " export_script_function()  - Tim Pope
-" url_encode()              - Bhupesh Varshney
-" json_decode()             - Mickael Daniel, Tim Pope
+" zhcovert.org           - 小斐
+" url_encode()           - Bhupesh Varshney
+" get_visual_selection() - xolox, FocusedWolf
 "
 " Distributed under terms of the MIT license.
 "
@@ -25,7 +25,9 @@ if !has("multi_byte")
     finish
 endif
 
-if !has("lua") && !executable("curl")
+" TODO: Windows
+" if !executable("PowerShell") && !executable("curl")
+if !executable("curl")
     call s:i18n({ 'en_GB': 'Fanhuaji.vim cannot operate as "curl" is missing on your system.
                 \ If Neovim is available to you,
                 \ please consider using it to run the Lua version of this plugin.
@@ -49,7 +51,7 @@ if !exists("g:fanhuaji_debug")
 endif
 
 if !exists("g:fanhuaji_server")
-    let g:fanhuaji_server = "https://api.zhconvert.org"
+    let g:fanhuaji_server = "https://api.zhconvert.org/convert"
 endif
 
 if !exists("g:fanhuaji_key")
@@ -57,7 +59,20 @@ if !exists("g:fanhuaji_key")
 endif
 
 if !exists("g:fanhuaji_fallback_register")
-    let g:fanhuaji_fallback_register = "f" " If the buffer changed during conversion.
+    " If the buffer changed during conversion.
+    " @see Fanhuaji#AsyncConvertVisualSelected()
+    "
+    let g:fanhuaji_fallback_register = "f"
+endif
+
+if !exists("g:fanhuaji_highlight_when_convert")
+    let g:fanhuaji_highlight_when_convert = 1
+endif
+
+let s:has_user_timeout = 1
+if !exists("g:fanhuaji_timeout")
+    let s:has_user_timeout = 0 " Configuration hint will be displayed for long requests.
+    let g:fanhuaji_timeout = 60
 endif
 
 " export_script_function() allows script functions to be called externally, i.e. in Lua.
@@ -70,9 +85,10 @@ endfunction
 " url_encode() makes strings safe to be embebdded in a shell command.
 "
 " https://gist.github.com/atripes/15372281209daf5678cded1d410e6c16
-function! s:url_encode(mystring) abort
+function! s:url_encode(text) abort
     let urlsafe = ""
-    for char in split(join(lines, "\n"), '.\zs')
+    for index in range(strcharlen(a:text))
+        let char = strcharpart(a:text, index, 1)
         if matchend(char, '[-_.~a-zA-Z0-9]') >= 0
             let urlsafe = urlsafe . char
         else
@@ -83,54 +99,47 @@ function! s:url_encode(mystring) abort
     return urlsafe
 endfunction
 
-" json_decode() turns JSON strings into dictionaries.
-"
-" https://github.com/vimlab/vim-json/blob/3792dbe83835579b8959448ca3f066f04a934688/autoload/JSON.vim
-function! s:json_decode(string) abort
-    let [null, false, true] = ['', 0, 1]
-    let stripped = substitute(a:string,'\C"\(\\.\|[^"\\]\)*"','','g')
-    if stripped !~# "[^,:{}\\[\\]0-9.\\-+Eaeflnr-u \n\r\t]"
-        try
-            return eval(substitute(a:string,"[\r\n]"," ",'g'))
-        catch
-        endtry
+" TODO: test under normal mode
+function! s:get_visual_selection()
+    let [line_start, column_start] = getpos("'<")[1:2]
+    let [line_end, column_end] = getpos("'>")[1:2]
+    let lines = getline(line_start, line_end)
+    if len(lines) == 0
+        return ''
     endif
-    call s:throw("invalid JSON: ".stripped)
+    let lines[-1] = lines[-1][: column_end - (&selection == 'inclusive' ? 1 : 2)]
+    let lines[0] = lines[0][column_start - 1:]
+    return join(lines, "\n")
 endfunction
 
+function! Fanhuaji#AsyncConvertVisualSelected()
+    " TODO
+endfunction
 
 " Fanhuaji#ConvertVisualSelected() acts depending on whether user's Vim has the Lua feature enabled.
 " If so, it invokes convert.lua with a fallback function.
 " Otherwise, it calls curl().
 "
+" Example converter: "Taiwan"
+"
 function! Fanhuaji#ConvertVisualSelected(converter)
-    " TODO: let data
+    let text = s:get_visual_selection()
+
+    " let last_search = "" " pending feature.
+    if g:fanhuaji_highlight_when_convert == 1
+        exe "/" . text
+    endif
+
     if has("lua")
         " TODO: warn if convert.lua doesn't exist.
-        let callback = "err_no_curl"
-        if executable("curl")
-            let callback = "curl"
-        endif
-        let exported = s:export_script_function(callback)
-        call luaeval('require("convert.lua").ConvertVisualSelected(a:converter, "' . exported . '")')
+        let expression = 'pcall(require("convert.lua").ConvertVisualSelected(_A[1], _A[2]))'
+        let result = luaeval(expression, converter, text)
+        " TODO: error handle
         return
     endif
 
-    s:curl()
-    " TODO: set data
-endfunction
-
-" err_no_curl() is used as a callback function passed to convert.lua
-"
-function! s:err_no_curl()
-    call s:i18n({ 'en_GB': 'Fanhuaji.vim cannot operate as Lua HTTP failed
-                \ while "curl" is missing on your system.
-                \ Please consider installing "curl"
-                \ or use the online Fanhuaji: https://zhconvert.org/', 'zh_TW': "
-                \
-                \Fanhuaji.vim 無法運行，因為 Lua HTTP 失效了，而您的系統上缺少 curl 。
-                \ 請考慮安裝 curl 或使用線上繁化姬： https://zhconvert.org/" })
-    " TODO: test convert + Chinese simplified
+    let decoded = s:curl(converter, text)
+    exe decoded["data"]["text"]
 endfunction
 
 " i18n() acts depending on whether user's Vim has the "multi_lang" feature enabled.
@@ -147,12 +156,17 @@ function! s:i18n(msgs)
     echom join(a:msgs, "\n\n")
 endfunction
 
-" curl() builds a HTTP request with the selected content in visual mode and
-" returns the downloaded data as a dictionary.
+" invoke_web_request() builds and executes an HTTP request with Windows
+" PowerShell Cmdlet Invoke-WebRequest and returns the downloaded data as a dictionary.
 "
-" Example converter: "Taiwan"
+function! s:invoke_web_request(converter, text)
+    " TODO
+endfunction
+
+" curl() builds and executes an HTTP request with cURL
+" and returns the downloaded data as a dictionary.
 "
-function! s:curl(converter)
+function! s:curl(converter, text)
     let debug_flag = ""
     if g:fanhuaji_debug
         let debug_flag = "-v "
@@ -162,7 +176,7 @@ function! s:curl(converter)
                 \ --header "Accept: application/json"
                 \ --get --data "converter=' . a:converter . '" '
     let cmd .= '--data "apiKey=' . g:fanhuaji_key . '" '
-    let cmd .= '--data "text=' . s:url_encode(text) . '" '
+    let cmd .= '--data "text=' . s:url_encode(a:text) . '" '
     let cmd .= debug_flag . g:fanhuaji_server
     let raw = system(cmd)
     if g:fanhuaji_debug
@@ -170,5 +184,5 @@ function! s:curl(converter)
         echom raw
     endif
 
-    return s:json_decode(raw)
+    return json_decode(raw)
 endfunction

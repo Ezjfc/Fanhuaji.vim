@@ -1,7 +1,7 @@
 # WIP
 | Eng | 繁 | 简 |
 
-# Fanhuaji.nvim
+# Fanhuaji.vim
 Conversion between Chinese writing systems and styles via 繁化姬.
 
 <!-- Based on top of Fanhuaji's Sublime Text plugin. -->
